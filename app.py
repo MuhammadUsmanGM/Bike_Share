@@ -14,338 +14,343 @@ from streamlit_folium import (
 
 from helpers import *  # Import custom helper functions
 
-# Configure Streamlit page
-st.set_page_config(
-    page_title="Toronto Bike Share Status",
-    page_icon="🚲",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# Configure page and handle errors gracefully
+try:
+    st.set_page_config(
+        page_title="Toronto Bike Share Status",
+        page_icon="🚲",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+except Exception as e:
+    st.error(f"Error configuring page: {str(e)}")
 
 
-# Error handling decorator for API calls
-def handle_api_error(func):
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except (urllib.error.URLError, requests.RequestException) as e:
-            st.error(f"Error fetching data: {str(e)}. Please try again later.")
-            return None
-        except Exception as e:
-            st.error(f"An unexpected error occurred: {str(e)}. Please try again later.")
-            return None
-
-    return wrapper
-
-
-# Initialize session state variables
-if "bike_method" not in st.session_state:
-    st.session_state.bike_method = "Rent"
-if "input_bike_modes" not in st.session_state:
-    st.session_state.input_bike_modes = []
-if "findmeabike" not in st.session_state:
-    st.session_state.findmeabike = False
-if "findmeadock" not in st.session_state:
-    st.session_state.findmeadock = False
-if "iamhere" not in st.session_state:
-    st.session_state.iamhere = 0
-if "iamhere_return" not in st.session_state:
-    st.session_state.iamhere_return = 0
-
-# Example URL to fetch bike share data (replace with the actual URL from the resource_urls list)
-station_url = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_status.json"
-latlon_url = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
-
-# Streamlit app setup
-st.title("Toronto Bike Share Station Status")  # Set the title of the app
-st.markdown(
-    "This dashboard tracks bike availability at each bike share station in Toronto."
-)  # Add a description
+# Initialize session state with defaults
+def init_session_state():
+    defaults = {
+        "bike_method": "Rent",
+        "input_bike_modes": [],
+        "findmeabike": False,
+        "findmeadock": False,
+        "iamhere": None,
+        "iamhere_return": None,
+        "data": None,
+        "error": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
 
-# Fetch data with error handling
+init_session_state()
+
+# API URLs
+STATION_URL = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_status.json"
+LATLON_URL = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
+
+
+# Fetch data with robust error handling
 @st.cache_data(ttl=60)
-@handle_api_error
 def get_data():
-    data_df = query_station_status(station_url)
-    if data_df is None:
+    try:
+        data_df = query_station_status(STATION_URL)
+        if data_df is None:
+            raise Exception("Failed to fetch station status data")
+
+        latlon_df = get_station_latlon(LATLON_URL)
+        if latlon_df is None:
+            raise Exception("Failed to fetch station location data")
+
+        data = join_latlon(data_df, latlon_df)
+        if data is None or data.empty:
+            raise Exception("Failed to join station data")
+
+        return data
+    except Exception as e:
+        st.session_state.error = f"Data fetch error: {str(e)}"
         return None
-    latlon_df = get_station_latlon(latlon_url)
-    if latlon_df is None:
-        return None
-    return join_latlon(data_df, latlon_df)
 
 
-# Get data
-data = get_data()
+# Main app layout
+def main():
+    st.title("Toronto Bike Share Station Status")
+    st.markdown(
+        "This dashboard tracks bike availability at each bike share station in Toronto."
+    )
 
-if data is not None:
-    # Display initial metrics
-    col1, col2, col3 = st.columns(3)  # Create three columns for metrics
+    # Fetch data
+    data = get_data()
+    if data is None:
+        st.error(
+            st.session_state.error
+            or "Unable to fetch bike share data. Please try again later."
+        )
+        return
+
+    # Display metrics
+    try:
+        display_metrics(data)
+    except Exception as e:
+        st.error(f"Error displaying metrics: {str(e)}")
+
+    # Sidebar inputs
+    try:
+        handle_sidebar_inputs(data)
+    except Exception as e:
+        st.error(f"Error processing inputs: {str(e)}")
+
+    # Display maps
+    try:
+        display_maps(data)
+    except Exception as e:
+        st.error(f"Error displaying maps: {str(e)}")
+
+
+def display_metrics(data):
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(
-            label="Bikes Available Now", value=sum(data["num_bikes_available"])
-        )  # Display total number of bikes available
-        st.metric(
-            label="E-Bikes Available Now", value=sum(data["ebike"])
-        )  # Display total number of e-bikes available
+        st.metric("Bikes Available Now", value=int(sum(data["num_bikes_available"])))
+        st.metric("E-Bikes Available Now", value=int(sum(data["ebike"])))
     with col2:
         st.metric(
-            label="Stations w Available Bikes",
-            value=len(data[data["num_bikes_available"] > 0]),
-        )  # Display number of stations with available bikes
+            "Stations w Available Bikes",
+            value=int(len(data[data["num_bikes_available"] > 0])),
+        )
         st.metric(
-            label="Stations w Available E-Bikes", value=len(data[data["ebike"] > 0])
-        )  # Display number of stations with available e-bikes
+            "Stations w Available E-Bikes", value=int(len(data[data["ebike"] > 0]))
+        )
     with col3:
         st.metric(
-            label="Stations w Empty Docks",
-            value=len(data[data["num_docks_available"] > 0]),
-        )  # Display number of stations with empty docks
-
-    # Track metrics for delta calculation
-    deltas = [
-        sum(data["num_bikes_available"]),
-        sum(data["ebike"]),
-        len(data[data["num_bikes_available"] > 0]),
-        len(data[data["ebike"] > 0]),
-        len(data[data["num_docks_available"] > 0]),
-    ]
-
-    # Add sidebar selection for user inputs
-    with st.sidebar:
-        bike_method = st.selectbox(
-            "Are you looking to rent or return a bike?",
-            ("Rent", "Return"),
-            key="bike_method",
+            "Stations w Empty Docks",
+            value=int(len(data[data["num_docks_available"] > 0])),
         )
 
-        if bike_method == "Rent":
-            input_bike_modes = st.multiselect(
-                "What kind of bikes are you looking to rent?",
-                ["ebike", "mechanical"],
-                key="input_bike_modes",
-            )
-            st.subheader("Where are you located?")
-            input_street = st.text_input("Street", "", key="input_street")
-            input_city = st.text_input("City", "Toronto", key="input_city")
-            input_country = st.text_input("Country", "Canada", key="input_country")
-            drive = st.checkbox("I'm driving there.", key="drive")
 
-            if st.button("Find me a bike!", type="primary"):
-                if input_street.strip() == "":
-                    st.error("Please input your location.")
-                else:
-                    with st.spinner("Finding the nearest bike..."):
-                        st.session_state.findmeabike = True
-                        st.session_state.iamhere = geocode(
-                            f"{input_street} {input_city} {input_country}"
-                        )
-                        if not st.session_state.iamhere:
-                            st.error("Invalid address. Please check your input.")
+def handle_sidebar_inputs(data):
+    with st.sidebar:
+        st.session_state.bike_method = st.selectbox(
+            "Are you looking to rent or return a bike?",
+            ("Rent", "Return"),
+            key="bike_method_select",
+        )
 
-        elif bike_method == "Return":
-            st.subheader("Where are you located?")
-            input_street_return = st.text_input("Street", "", key="input_street_return")
-            input_city_return = st.text_input(
-                "City", "Toronto", key="input_city_return"
-            )
-            input_country_return = st.text_input(
-                "Country", "Canada", key="input_country_return"
-            )
+        if st.session_state.bike_method == "Rent":
+            handle_rent_inputs()
+        else:
+            handle_return_inputs()
 
-            if st.button("Find me a dock!", type="primary"):
-                if input_street_return.strip() == "":
-                    st.error("Please input your location.")
-                else:
-                    with st.spinner("Finding the nearest dock..."):
-                        st.session_state.findmeadock = True
-                        st.session_state.iamhere_return = geocode(
-                            f"{input_street_return} {input_city_return} {input_country_return}"
-                        )
-                        if not st.session_state.iamhere_return:
-                            st.error("Invalid address. Please check your input.")
+        if st.button("Reset"):
+            reset_session_state()
 
+
+def handle_rent_inputs():
+    st.session_state.input_bike_modes = st.multiselect(
+        "What kind of bikes are you looking to rent?", ["ebike", "mechanical"]
+    )
+
+    st.subheader("Where are you located?")
+    col1, col2 = st.columns(2)
+    with col1:
+        input_street = st.text_input("Street", key="rent_street")
+        input_city = st.text_input("City", "Toronto", key="rent_city")
+    with col2:
+        input_country = st.text_input("Country", "Canada", key="rent_country")
+
+    if st.button("Find me a bike!", type="primary"):
+        process_rent_request(input_street, input_city, input_country)
+
+
+def handle_return_inputs():
+    st.subheader("Where are you located?")
+    col1, col2 = st.columns(2)
+    with col1:
+        input_street = st.text_input("Street", key="return_street")
+        input_city = st.text_input("City", "Toronto", key="return_city")
+    with col2:
+        input_country = st.text_input("Country", "Canada", key="return_country")
+
+    if st.button("Find me a dock!", type="primary"):
+        process_return_request(input_street, input_city, input_country)
+
+
+def process_rent_request(street, city, country):
+    if not street.strip():
+        st.error("Please enter your street address.")
+        return
+
+    with st.spinner("Finding the nearest available bike..."):
+        try:
+            location = geocode(f"{street} {city} {country}")
+            if not location:
+                st.error("Could not find this address. Please check your input.")
+                return
+            st.session_state.iamhere = location
+            st.session_state.findmeabike = True
+        except Exception as e:
+            st.error(f"Error processing location: {str(e)}")
+
+
+def process_return_request(street, city, country):
+    if not street.strip():
+        st.error("Please enter your street address.")
+        return
+
+    with st.spinner("Finding the nearest available dock..."):
+        try:
+            location = geocode(f"{street} {city} {country}")
+            if not location:
+                st.error("Could not find this address. Please check your input.")
+                return
+            st.session_state.iamhere_return = location
+            st.session_state.findmeadock = True
+        except Exception as e:
+            st.error(f"Error processing location: {str(e)}")
+
+
+def display_maps(data):
+    if st.session_state.bike_method == "Rent":
+        display_rent_map(data)
+    else:
+        display_return_map(data)
+
+
+def display_rent_map(data):
     try:
-        # Display map based on session state
-        if bike_method == "Return" and not st.session_state.findmeadock:
-            center = [43.65306613746548, -79.38815311015]  # Coordinates for Toronto
-            m = folium.Map(
-                location=center, zoom_start=13, tiles="cartodbpositron"
-            )  # Create a map with a grey background
-            for _, row in data.iterrows():
-                marker_color = get_marker_color(
-                    row["num_bikes_available"]
-                )  # Determine marker color based on bikes available
-                folium.CircleMarker(
-                    location=[row["lat"], row["lon"]],
-                    radius=2,
-                    color=marker_color,
-                    fill=True,
-                    fill_color=marker_color,
-                    fill_opacity=0.7,
-                    popup=folium.Popup(
-                        f"Station ID: {row['station_id']}<br>"
-                        f"Total Bikes Available: {row['num_bikes_available']}<br>"
-                        f"Mechanical Bike Available: {row['mechanical']}<br>"
-                        f"eBike Available: {row['ebike']}",
-                        max_width=300,
-                    ),
-                ).add_to(m)
-            st_folium(
-                m, key="initial_return_map", width=800
-            )  # Display the map in the Streamlit app
-
-        if bike_method == "Rent" and not st.session_state.findmeabike:
-            center = [43.65306613746548, -79.38815311015]  # Coordinates for Toronto
-            m = folium.Map(
-                location=center, zoom_start=13, tiles="cartodbpositron"
-            )  # Create a map with a grey background
-            for _, row in data.iterrows():
-                marker_color = get_marker_color(
-                    row["num_bikes_available"]
-                )  # Determine marker color based on bikes available
-                folium.CircleMarker(
-                    location=[row["lat"], row["lon"]],
-                    radius=2,
-                    color=marker_color,
-                    fill=True,
-                    fill_color=marker_color,
-                    fill_opacity=0.7,
-                    popup=folium.Popup(
-                        f"Station ID: {row['station_id']}<br>"
-                        f"Total Bikes Available: {row['num_bikes_available']}<br>"
-                        f"Mechanical Bike Available: {row['mechanical']}<br>"
-                        f"eBike Available: {row['ebike']}",
-                        max_width=300,
-                    ),
-                ).add_to(m)
-            st_folium(
-                m, key="initial_rent_map", width=800
-            )  # Display the map in the Streamlit app
-
-        # Logic for finding a bike
         if st.session_state.findmeabike and st.session_state.iamhere:
-            try:
-                chosen_station = get_bike_availability(
-                    st.session_state.iamhere, data, st.session_state.input_bike_modes
-                )
-                if chosen_station:
-                    center = st.session_state.iamhere
-                    m1 = folium.Map(
-                        location=center, zoom_start=16, tiles="cartodbpositron"
-                    )
-                    for _, row in data.iterrows():
-                        marker_color = get_marker_color(row["num_bikes_available"])
-                        folium.CircleMarker(
-                            location=[row["lat"], row["lon"]],
-                            radius=2,
-                            color=marker_color,
-                            fill=True,
-                            fill_color=marker_color,
-                            fill_opacity=0.7,
-                            popup=folium.Popup(
-                                f"Station ID: {row['station_id']}<br>"
-                                f"Total Bikes Available: {row['num_bikes_available']}<br>"
-                                f"Mechanical Bike Available: {row['mechanical']}<br>"
-                                f"eBike Available: {row['ebike']}",
-                                max_width=300,
-                            ),
-                        ).add_to(m1)
-                    folium.Marker(
-                        location=st.session_state.iamhere,
-                        popup="You are here.",
-                        icon=folium.Icon(color="blue", icon="person", prefix="fa"),
-                    ).add_to(m1)
-                    folium.Marker(
-                        location=(chosen_station[1], chosen_station[2]),
-                        popup="Rent your bike here.",
-                        icon=folium.Icon(color="red", icon="bicycle", prefix="fa"),
-                    ).add_to(m1)
-                    coordinates, duration = run_osrm(
-                        chosen_station, st.session_state.iamhere
-                    )
-                    folium.PolyLine(
-                        locations=coordinates,
-                        color="blue",
-                        weight=5,
-                        tooltip="it'll take you {} to get here.".format(duration),
-                    ).add_to(m1)
-                    st_folium(m1, key="route_rent_map", width=800)
-                    with col3:
-                        st.metric(label=":green[Travel Time (min)]", value=duration)
-                else:
-                    st.error("No available bikes found at nearby stations.")
-            except Exception as e:
-                st.error(f"Error finding a bike: {str(e)}")
+            display_route_map(
+                data,
+                st.session_state.iamhere,
+                st.session_state.input_bike_modes,
+                is_return=False,
+            )
+        else:
+            display_initial_map(data, "rent")
+    except Exception as e:
+        st.error(f"Error displaying rent map: {str(e)}")
 
-        # Logic for finding a dock
+
+def display_return_map(data):
+    try:
         if st.session_state.findmeadock and st.session_state.iamhere_return:
-            try:
-                chosen_station = get_dock_availability(
-                    st.session_state.iamhere_return, data
-                )
-                if chosen_station:
-                    center = st.session_state.iamhere_return
-                    m1 = folium.Map(
-                        location=center, zoom_start=16, tiles="cartodbpositron"
-                    )
-                    for _, row in data.iterrows():
-                        marker_color = get_marker_color(row["num_bikes_available"])
-                        folium.CircleMarker(
-                            location=[row["lat"], row["lon"]],
-                            radius=2,
-                            color=marker_color,
-                            fill=True,
-                            fill_color=marker_color,
-                            fill_opacity=0.7,
-                            popup=folium.Popup(
-                                f"Station ID: {row['station_id']}<br>"
-                                f"Total Bikes Available: {row['num_bikes_available']}<br>"
-                                f"Mechanical Bike Available: {row['mechanical']}<br>"
-                                f"eBike Available: {row['ebike']}",
-                                max_width=300,
-                            ),
-                        ).add_to(m1)
-                    folium.Marker(
-                        location=st.session_state.iamhere_return,
-                        popup="You are here.",
-                        icon=folium.Icon(color="blue", icon="person", prefix="fa"),
-                    ).add_to(m1)
-                    folium.Marker(
-                        location=(chosen_station[1], chosen_station[2]),
-                        popup="Return your bike here.",
-                        icon=folium.Icon(color="red", icon="bicycle", prefix="fa"),
-                    ).add_to(m1)
-                    coordinates, duration = run_osrm(
-                        chosen_station, st.session_state.iamhere_return
-                    )
-                    folium.PolyLine(
-                        locations=coordinates,
-                        color="blue",
-                        weight=5,
-                        tooltip="it'll take you {} to get here.".format(duration),
-                    ).add_to(m1)
-                    st_folium(m1, key="route_return_map", width=800)
-                    with col3:
-                        st.metric(label=":green[Travel Time (min)]", value=duration)
-                else:
-                    st.error("No available docks found at nearby stations.")
-            except Exception as e:
-                st.error(f"Error finding a dock: {str(e)}")
+            display_route_map(
+                data, st.session_state.iamhere_return, None, is_return=True
+            )
+        else:
+            display_initial_map(data, "return")
+    except Exception as e:
+        st.error(f"Error displaying return map: {str(e)}")
+
+
+def display_initial_map(data, map_type):
+    center = [43.65306613746548, -79.38815311015]
+    m = folium.Map(location=center, zoom_start=13, tiles="cartodbpositron")
+
+    for _, row in data.iterrows():
+        marker_color = get_marker_color(row["num_bikes_available"])
+        folium.CircleMarker(
+            location=[row["lat"], row["lon"]],
+            radius=2,
+            color=marker_color,
+            fill=True,
+            fill_color=marker_color,
+            fill_opacity=0.7,
+            popup=create_popup_html(row),
+        ).add_to(m)
+
+    st_folium(m, key=f"initial_{map_type}_map", width=800, height=600)
+
+
+def display_route_map(data, location, bike_modes=None, is_return=False):
+    try:
+        if is_return:
+            chosen_station = get_dock_availability(location, data)
+        else:
+            chosen_station = get_bike_availability(location, data, bike_modes or [])
+
+        if not chosen_station:
+            st.error("No available stations found nearby.")
+            return
+
+        m = create_route_map(data, location, chosen_station, is_return)
+        st_folium(
+            m,
+            key=f"route_{'return' if is_return else 'rent'}_map",
+            width=800,
+            height=600,
+        )
 
     except Exception as e:
-        st.error(f"Error displaying map: {str(e)}")
+        st.error(f"Error creating route map: {str(e)}")
 
-    # Add a reset button in the sidebar
-    with st.sidebar:
-        if st.button("Reset"):
-            st.session_state.findmeabike = False
-            st.session_state.findmeadock = False
-            st.session_state.iamhere = 0
-            st.session_state.iamhere_return = 0
-            st.session_state.input_bike_modes = []
-            st.experimental_rerun()
 
-else:
-    st.error("Unable to fetch bike share data. Please try again later.")
+def create_route_map(data, location, chosen_station, is_return):
+    m = folium.Map(location=location, zoom_start=16, tiles="cartodbpositron")
+
+    # Add station markers
+    for _, row in data.iterrows():
+        marker_color = get_marker_color(row["num_bikes_available"])
+        folium.CircleMarker(
+            location=[row["lat"], row["lon"]],
+            radius=2,
+            color=marker_color,
+            fill=True,
+            fill_color=marker_color,
+            fill_opacity=0.7,
+            popup=create_popup_html(row),
+        ).add_to(m)
+
+    # Add user location marker
+    folium.Marker(
+        location=location,
+        popup="You are here",
+        icon=folium.Icon(color="blue", icon="info-sign"),
+    ).add_to(m)
+
+    # Add chosen station marker
+    folium.Marker(
+        location=(chosen_station[1], chosen_station[2]),
+        popup="Return here" if is_return else "Rent here",
+        icon=folium.Icon(color="red", icon="info-sign"),
+    ).add_to(m)
+
+    # Add route
+    try:
+        coordinates, duration = run_osrm(chosen_station, location)
+        folium.PolyLine(
+            locations=coordinates, weight=2, color="blue", opacity=0.8
+        ).add_to(m)
+
+        # Display duration
+        col1, col2, col3 = st.columns(3)
+        with col3:
+            st.metric(":green[Travel Time (min)]", f"{duration:.1f}")
+
+    except Exception as e:
+        st.warning(f"Could not calculate route: {str(e)}")
+
+    return m
+
+
+def create_popup_html(row):
+    return folium.Popup(
+        f"Station ID: {row['station_id']}<br>"
+        f"Total Bikes Available: {row['num_bikes_available']}<br>"
+        f"Mechanical Bikes: {row['mechanical']}<br>"
+        f"E-Bikes: {row['ebike']}<br>"
+        f"Docks Available: {row['num_docks_available']}",
+        max_width=300,
+    )
+
+
+def reset_session_state():
+    st.session_state.findmeabike = False
+    st.session_state.findmeadock = False
+    st.session_state.iamhere = None
+    st.session_state.iamhere_return = None
+    st.session_state.input_bike_modes = []
+    st.experimental_rerun()
+
+
+if __name__ == "__main__":
+    main()

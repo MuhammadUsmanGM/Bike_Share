@@ -9,4 +9,4 @@ font="sans serif"
 maxUploadSize = 200
 maxMessageSize = 200
 enableXsrfProtection = true
-enableCORS = false 
+enableCORS = false
